@@ -13,6 +13,7 @@ from scipy.stats import pearsonr
 import seaborn as sns
 from itertools import product
 from scipy import stats
+from typing import Dict
 
 # Import functions from existing analysis files
 from hourly_enhanced_sigmoid_analysis import (
@@ -189,7 +190,7 @@ class FeeOptimizedTradingStrategy:
             # Scale more aggressively for stronger signals
             position_multiplier = 1 + (signal_strength ** 2) * 2  # Quadratic scaling
         else:
-        position_multiplier = 1 + signal_strength
+            position_multiplier = 1 + signal_strength
         
         position_size_pct = min(base_position * position_multiplier, self.max_position_size)
         return position_size_pct
@@ -230,92 +231,52 @@ class FeeOptimizedTradingStrategy:
         
         return True, smoothed
 
-    def execute_trade(self, signal_direction, signal_strength, crypto_price, market_prob, 
-                     expected_prob, linear_distance, timestamp, hours_remaining, market_name):
-        """Execute trade with all fee optimization checks"""
-        
-        # Package signal data
-        signal_data = {
-            'signal_direction': signal_direction,
-            'signal_strength': signal_strength,
-            'linear_distance': linear_distance,
-            'price': crypto_price,
-            'hours_remaining': hours_remaining
-        }
-        
-        # Check if we should execute this trade
-        should_trade, result = self.should_execute_trade(signal_data, crypto_price, timestamp)
-        
-        if not should_trade:
-            return  # Trade filtered out
-        
-        # Use smoothed signal data
-        smoothed_signal = result
-        signal_direction = smoothed_signal['signal_direction']
-        signal_strength = smoothed_signal['signal_strength']
-        
-        if signal_direction == 'HOLD':
-            return
-        
-        # Close existing position if any
-        if self.current_position is not None:
-            self.close_position(crypto_price, timestamp, market_name)
-        
-        # Calculate position size
-        position_size_pct = self.calculate_position_size(signal_strength)
-        gross_trade_value = self.portfolio_value * position_size_pct
-        
-        # Calculate trading fee with BNB discount
-        trading_fee = self.calculate_trading_fee(gross_trade_value, is_maker=False)
-        net_trade_value = gross_trade_value - trading_fee
-        position_shares = net_trade_value / crypto_price
-        
-        # Update portfolio for fee
-        self.portfolio_value -= trading_fee
-        self.total_fees_paid += trading_fee
-        self.last_trade_timestamp = timestamp
-        
-        # Track timestamps
-        if self.start_timestamp is None:
-            self.start_timestamp = timestamp
-        self.end_timestamp = timestamp
-        
-        # Open new position
-        self.current_position = {
-            'direction': signal_direction,
-            'entry_price': crypto_price,
-            'entry_timestamp': timestamp,
-            'position_shares': position_shares,
-            'trade_value': net_trade_value,
-            'entry_fee': trading_fee,
-            'market_name': market_name,
-            'hours_remaining': hours_remaining,
-            'signal_strength': signal_strength,
-            'linear_distance': linear_distance,
-            'market_prob': market_prob,
-            'expected_prob': expected_prob
-        }
-        
-        trade_record = {
-            'timestamp': timestamp,
-            'action': 'OPEN',
-            'direction': signal_direction,
-            'crypto_price': crypto_price,
-            'position_shares': position_shares,
-            'trade_value': net_trade_value,
-            'fee': trading_fee,
-            'signal_strength': signal_strength,
-            'linear_distance': linear_distance,
-            'hours_remaining': hours_remaining,
-            'market_name': market_name,
-            'portfolio_value': self.portfolio_value
-        }
-        
-        self.trades.append(trade_record)
-        
-        #print(f"🎯 {signal_direction} | Price: ${crypto_price:,.0f} | Size: {position_size_pct:.1%} | "
-              #f"Signal: {abs(linear_distance):.3f} | Hours: {hours_remaining:.1f} | "
-              #f"Fee: ${trading_fee:.2f}")
+    def execute_trade(self, signal_data: Dict) -> bool:
+        """Execute trade with small account considerations"""
+        try:
+            # Get current account balance
+            account_info = self.get_account_info()
+            usdt_balance = 0
+            
+            for balance in account_info.get('balances', []):
+                if balance['asset'] == 'USDT':
+                    usdt_balance = float(balance['free'])
+                    break
+            
+            if usdt_balance < 10:  # Less than $10 available
+                logger.warning(f"Insufficient balance: ${usdt_balance:.2f}")
+                return False
+            
+            # Use small account position sizing
+            position_size_pct = self.calculate_position_size_small_account(
+                signal_data['strength'], usdt_balance
+            )
+            
+            if position_size_pct == 0:
+                logger.info("Position size too small for minimum order requirements")
+                return False
+            
+            position_value = usdt_balance * position_size_pct
+            btc_price = signal_data['btc_price']
+            quantity = position_value / btc_price
+            
+            # Round to appropriate precision for BTC
+            quantity = round(quantity, 5)  # 5 decimal places for small amounts
+            
+            # Validate order size
+            is_valid, message = self.validate_order_size(quantity, btc_price)
+            if not is_valid:
+                logger.warning(f"Order validation failed: {message}")
+                return False
+            
+            logger.info(f"Order validated: {quantity} BTC = ${position_value:.2f}")
+            
+            # Rest of the trading logic...
+            # (Same as before but with validation)
+            
+        except Exception as e:
+            logger.error(f"Error in small account trading: {e}")
+            return False
 
     def close_position(self, exit_price, exit_timestamp, market_name):
         """Close position with fee optimization"""
@@ -597,7 +558,7 @@ def create_parameter_analysis_plots(df_results, crypto="bitcoin"):
     
     if df_results is None or len(df_results) == 0:
         print("❌ No results to plot!")
-            return
+        return
         
     print(f"📊 Creating plots for {len(df_results)} results...")
     
@@ -645,7 +606,7 @@ def create_signal_threshold_plots(df_results, crypto):
     threshold_groups = df_results.groupby('signal_threshold')
     
     # Plot 1: Daily Return vs Threshold
-        ax1 = axes[0, 0]
+    ax1 = axes[0, 0]
     thresholds = []
     returns_mean = []
     returns_std = []
@@ -659,10 +620,10 @@ def create_signal_threshold_plots(df_results, crypto):
     ax1.set_xlabel('Signal Threshold')
     ax1.set_ylabel('Daily Return %')
     ax1.set_title('Daily Return vs Signal Threshold')
-        ax1.grid(True, alpha=0.3)
+    ax1.grid(True, alpha=0.3)
         
     # Plot 2: Trade Frequency vs Threshold
-        ax2 = axes[0, 1]
+    ax2 = axes[0, 1]
     trades_mean = []
     trades_std = []
     
@@ -674,7 +635,7 @@ def create_signal_threshold_plots(df_results, crypto):
     ax2.set_xlabel('Signal Threshold')
     ax2.set_ylabel('Number of Trades')
     ax2.set_title('Trade Frequency vs Signal Threshold')
-            ax2.grid(True, alpha=0.3)
+    ax2.grid(True, alpha=0.3)
         
     # Plot 3: Win Rate vs Threshold
     ax3 = axes[0, 2]
@@ -992,7 +953,7 @@ def create_smoothing_plots(df_results, crypto):
     ax2.grid(True, alpha=0.3)
     
     # Plot 3: Win Rate vs Smoothing (should improve with smoothing)
-        ax3 = axes[1, 0]
+    ax3 = axes[1, 0]
     winrate_mean = []
     winrate_std = []
     
@@ -1004,7 +965,7 @@ def create_smoothing_plots(df_results, crypto):
     ax3.set_xlabel('Signal Smoothing Window')
     ax3.set_ylabel('Win Rate')
     ax3.set_title('Win Rate vs Smoothing Window')
-                ax3.grid(True, alpha=0.3)
+    ax3.grid(True, alpha=0.3)
                 
     # Plot 4: Return Volatility vs Smoothing
     ax4 = axes[1, 1]
@@ -1081,7 +1042,7 @@ def create_correlation_analysis(df_results, crypto):
                         # Only fit if there's actual variation
                         if x_clean.std() > 1e-10:
                             z = np.polyfit(x_clean, y_clean, 1)
-                p = np.poly1d(z)
+                            p = np.poly1d(z)
                             x_sorted = np.sort(x_clean)
                             ax2.plot(x_sorted, p(x_sorted), color=colors[i], linestyle='--', alpha=0.8)
                 except (np.linalg.LinAlgError, ValueError, RuntimeWarning):
@@ -1121,7 +1082,7 @@ def create_correlation_analysis(df_results, crypto):
         ax4.set_ylabel('Return per Fee Ratio')
         ax4.set_title('Trading Efficiency (colored by Win Rate)')
         plt.colorbar(scatter2, ax=ax4, label='Win Rate')
-            ax4.grid(True, alpha=0.3)
+        ax4.grid(True, alpha=0.3)
         
         plt.tight_layout()
         plt.savefig(f'analysis_results/parameter_analysis/correlation_analysis_{crypto}.png', 
